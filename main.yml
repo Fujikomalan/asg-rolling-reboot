@@ -1,0 +1,106 @@
+---
+- name: "AutoScaling Group Reboot Script"
+  hosts: localhost
+  become: false
+  gather_facts: false
+  vars_files:
+    - variables.yml
+  tasks:
+
+    - name: "Fetching Details Of AutoScaling Group {{ asg_name }}"
+      amazon.aws.autoscaling_group_info:
+        access_key: "{{ access_key }}"
+        secret_key: "{{ secret_key }}"
+        region: "{{ region }}"
+        name: "{{ asg_name }}"
+      register: asg_info
+
+    - name: "Creating A List Of Autoscaling Group Instances Ids"
+      set_fact:
+        instance_ids: "{{ asg_info.results.0.instances | map(attribute='instance_id') }}"
+
+    - name: "Fetching Details Of Instance Inside AutoScaling Group"
+      ec2_instance_info:
+        access_key: "{{ access_key }}"
+        secret_key: "{{ secret_key }}"
+        region: "{{ region }}"
+        instance_ids: "{{ instance_ids }}"
+      register: asg_instances_info
+    
+
+#  Creating a Dictionary where 
+#  iptoid = {'192.168.1.1':'i-12345' , '192.168.1.2':'i-67890'}
+  
+    - name: "Creating PulbicIp to InstanceId Dictionary"
+      set_fact:
+        iptoid: "{{ iptoid | default({}) | combine( { item.public_ip_address:item.instance_id} ) }}"
+      loop: "{{  asg_instances_info.instances }}"
+
+
+    - name: "Creating Dynamic Inventory Of AutoScaling Group"
+      add_host:
+        hostname: "{{ item.public_ip_address }}"
+        inventory_hostname: "{{ item.public_ip_address }}"
+        ansible_ssh_user: "{{ instance_ssh_user }}"
+        ansible_ssh_host: "{{ item.public_ip_address }}"
+        ansible_ssh_port: "{{ instance_ssh_port }}"
+        groups:
+          - asg
+        ansible_ssh_private_key_file: "{{ instance_ssh_key }}"
+        ansible_ssh_common_args: "-o StrictHostKeyChecking=no"
+      loop: "{{ asg_instances_info.instances }}"
+
+
+    - name: "Before Reboot - Setting Minimum Instance Count to 0"
+      amazon.aws.autoscaling_group:
+        access_key: "{{ access_key }}"
+        secret_key: "{{ secret_key }}"
+        region: "{{ region }}"
+        name: "{{ asg_name }}"
+        min_size: 0
+
+- name: "Rebooting Ec2 Instance"
+  become: true
+  hosts: asg
+  serial: 1
+  vars_files:
+    - variables.yml
+  vars:
+    iptoid:  "{{hostvars['localhost']['iptoid']}}"
+
+
+  tasks:
+
+# "iptoid[inventory_hostname]" will return the instance id    
+# iptoid = {'192.168.1.1':'i-12345' , '192.168.1.2':'i-67890'}
+    - name: "Setting Instance To StandBy InstanceIp {{ inventory_hostname }} Instance-Id {{ iptoid[inventory_hostname]  }}"
+      ignore_errors: true
+      delegate_to: localhost
+      become: false
+      shell: "aws autoscaling enter-standby --instance-ids $INSTANCE_ID --auto-scaling-group-name ${ASG_NAME} --should-decrement-desired-capacity"
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ secret_key }}"
+        AWS_DEFAULT_REGION: "{{ region }}"
+        INSTANCE_ID: '{{ iptoid[inventory_hostname] }}'
+        ASG_NAME: "{{ asg_name }}"
+      
+    
+    - name: "Waiting For The Connection Draining  {{ inventory_hostname }} [ {{iptoid[inventory_hostname]}} ]"
+      wait_for:
+        timeout: "{{ connection_drain_time }}"
+
+    - name: "Rebooting Instance {{ inventory_hostname }} [ {{iptoid[inventory_hostname]}} ]"
+      reboot:
+        test_command: uptime
+
+    - name: "Setting Instance To InService"
+      delegate_to: localhost
+      become: false
+      shell: "aws autoscaling exit-standby --instance-ids $INSTANCE_ID --auto-scaling-group-name $ASG_NAME"
+      environment:
+        AWS_ACCESS_KEY_ID: "{{ access_key }}"
+        AWS_SECRET_ACCESS_KEY: "{{ secret_key }}"
+        AWS_DEFAULT_REGION: "{{ region }}"
+        INSTANCE_ID: '{{ iptoid[inventory_hostname] }}'
+        ASG_NAME: "{{ asg_name }}"

@@ -1,0 +1,10 @@
+---
+asg_name: ""
+access_key: ""
+secret_key: ""
+region:  ""
+
+instance_ssh_user: "ec2-user"
+instance_ssh_port: "22"
+instance_ssh_key: "aws.pem"
+connection_drain_time: 70
